@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- カスタムCSS (UIの微調整) ---
+# --- カスタムCSS ---
 st.markdown("""
 <style>
     .stButton>button {
@@ -27,18 +27,20 @@ st.markdown("""
     .reportview-container {
         background: #f0f2f6;
     }
-    h1 {
-        color: #1E1E1E;
-    }
-    h3 {
-        color: #333333;
-        border-bottom: 2px solid #FF4B4B;
-        padding-bottom: 10px;
-    }
+    h1 { color: #1E1E1E; }
+    h3 { color: #333333; border-bottom: 2px solid #FF4B4B; padding-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 関数定義 ---
+
+def get_api_key():
+    """SecretsからAPIキーを取得する"""
+    try:
+        return st.secrets["OPENAI_API_KEY"]
+    except KeyError:
+        st.error("🚨 API Keyが設定されていません。.streamlit/secrets.toml を確認してください。")
+        return None
 
 def encode_image(image_file):
     """画像をBase64エンコードする"""
@@ -47,210 +49,196 @@ def encode_image(image_file):
         return base64.b64encode(bytes_data).decode('utf-8')
     return None
 
-def generate_prompt(api_key, product_info, target_info, design_info, image_base64=None):
-    """OpenAI APIを呼び出してJSONプロンプトを生成する"""
-    
+def generate_json_prompt(api_key, product_info, target_info, design_info, image_base64=None):
+    """GPT-4oでJSONプロンプトを生成する"""
     client = openai.OpenAI(api_key=api_key)
     
     # JSONスキーマ定義
-    json_schema = {
-        "product_name": product_info['name'],
-        "target_audience": f"{target_info['age']} years old, {target_info['gender']}",
-        "concept_rationale": "Reasoning for the design choice (WPP Ace perspective)",
+    schema_structure = """
+    {
+        "product_name": "String",
+        "target_audience": "String",
+        "concept_rationale": "String",
         "nano_banana_pro_prompt": {
-            "prompt": "Highly detailed English prompt for image generation...",
-            "negative_prompt": "Low quality, blurry, text, watermark...",
-            "aspect_ratio": design_info['aspect_ratio'],
-            "layout_template": design_info['layout'],
-            "color_palette": ["#Hex1", "#Hex2", "#Hex3"],
-            "mood": "Energetic / Calm / Luxury etc."
+            "prompt": "String (Detailed English Prompt for DALL-E 3)",
+            "negative_prompt": "String",
+            "aspect_ratio": "String",
+            "layout_template": "String",
+            "color_palette": ["Hex1", "Hex2", "Hex3"],
+            "mood": "String"
         }
     }
-
-    # システムプロンプト：WPPエース社員の人格
-    system_instruction = """
-    You are an Ace Creative Director at the WPP Group, specializing in Digital Out-of-Home (DOOH) advertising for convenience stores.
-    
-    Your Mission:
-    Create a highly effective image generation prompt (JSON format) for a product to be displayed on a convenience store digital signage.
-    
-    Key Considerations:
-    1. **Context**: Convenience store customers decide in < 1 second. High visibility and appetizing/appealing visuals are crucial.
-    2. **Targeting**: Analyze the Age, Gender, Income, and Repeat Rate to determine the optimal color psychology, lighting, and composition.
-    3. **Output**: You must output ONLY valid JSON matching the provided schema. The 'prompt' field should be in English, highly descriptive, focusing on lighting, textures, and composition tailored for AI image generators (like Midjourney or Stable Diffusion).
     """
 
-    # ユーザープロンプトの構築
+    system_instruction = f"""
+    You are an Ace Creative Director at WPP Group.
+    Create a highly effective image generation prompt (JSON) for convenience store digital signage.
+    
+    STRICT OUTPUT FORMAT:
+    You MUST output a valid JSON object strictly following this structure:
+    {schema_structure}
+    
+    IMPORTANT for Image Generation:
+    The 'prompt' field must be optimized for DALL-E 3. It should be descriptive, specifying lighting, camera angle, and textures.
+    Exclude text rendering instructions as DALL-E struggle with specific Japanese text. Focus on visual impact.
+    """
+
     user_content = [
         {
             "type": "text",
             "text": f"""
-            Please generate a JSON prompt based on the following inputs:
-            
-            [Product Info]
-            - Name: {product_info['name']}
-            - Features: {product_info['features']}
-            
-            [Target Audience]
-            - Age: {target_info['age']}
-            - Gender: {target_info['gender']}
-            - Income: {target_info['income']}
-            - Type: {target_info['repeat_type']}
-            
-            [Design Specs]
-            - Orientation: {design_info['orientation']} (Set aspect_ratio to {design_info['aspect_ratio']})
-            - Layout: {design_info['layout']}
+            Generate a JSON prompt for:
+            [Product] {product_info['name']} - {product_info['features']}
+            [Target] {target_info['age']}yo {target_info['gender']}, Income:{target_info['income']}, Type:{target_info['repeat_type']}
+            [Design] {design_info['orientation']}, Layout: {design_info['layout']}
             """
         }
     ]
 
-    # 画像がある場合はVision用のメッセージを追加
     if image_base64:
         user_content.append({
             "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{image_base64}"
-            }
+            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
         })
-        user_content[0]["text"] += "\n[Visual Reference]\nRefer to the attached product image for color accuracy and packaging details."
+        user_content[0]["text"] += "\nRefer to the attached image for product appearance."
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o", # Vision機能と高いJSON生成能力のためGPT-4o推奨
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": user_content}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.7
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        raise e
+    response = client.chat.completions.create(
+        model="gpt-4o", 
+        messages=[
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": user_content}
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.7
+    )
+    return response.choices[0].message.content
 
-# --- サイドバー: 設定 ---
+def generate_image_dalle3(api_key, prompt_text, orientation):
+    """DALL-E 3で画像を生成する"""
+    client = openai.OpenAI(api_key=api_key)
+    
+    # DALL-E 3のサイズ指定 (Standard / Wide / Tall)
+    if "横長" in orientation:
+        size = "1792x1024" # 16:9に近いワイド
+    elif "縦長" in orientation:
+        size = "1024x1792" # 9:16に近いトール
+    else:
+        size = "1024x1024"
+
+    response = client.images.generate(
+        model="dall-e-3",
+        prompt=prompt_text,
+        size=size,
+        quality="standard",
+        n=1,
+    )
+    return response.data[0].url
+
+# --- サイドバー ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063822.png", width=80)
     st.title("Settings")
-    
-    api_key = st.text_input("OpenAI API Key", type="password", help="Start with sk-...")
-    
-    st.markdown("---")
+    st.markdown("API Key is managed via Secrets.")
     st.info("""
     **Developer:** WPP Creative Logic Module
-    **Version:** 1.0.0
-    **Target:** Nano Banana Pro
+    **Target:** Nano Banana Pro + DALL-E 3
     """)
 
 # --- メインエリア ---
-st.title("🍌 Nano Banana Pro: Ad Prompt Generator")
-st.caption("Convenience Store Digital Signage Optimization Tool")
+st.title("🍌 Nano Banana Pro: Ad Creator")
+st.caption("Auto-Generate Prompts & Visuals for Digital Signage")
 
-# フォームエリア
+api_key = get_api_key()
+
 with st.form("main_form"):
-    
-    # 1. 商品情報
     st.subheader("1. Product Information")
     col1, col2 = st.columns([1, 1])
-    
     with col1:
         product_name = st.text_input("商品名", placeholder="例: プレミアム濃厚プリン")
-        product_features = st.text_area("商品特徴・訴求ポイント", placeholder="例: 北海道産生クリーム使用、とろける食感、自分へのご褒美、金色のパッケージ", height=100)
-    
+        product_features = st.text_area("商品特徴", placeholder="例: 金色のパッケージ、シズル感、高級感", height=100)
     with col2:
-        uploaded_file = st.file_uploader("商品画像 (任意)", type=['png', 'jpg', 'jpeg'], help="AIが画像を解析し、パッケージや色味を忠実に再現しようとします。")
+        uploaded_file = st.file_uploader("商品画像 (任意)", type=['png', 'jpg', 'jpeg'])
         if uploaded_file:
-            st.image(uploaded_file, caption="Reference Image", width=200)
+            st.image(uploaded_file, caption="Ref Image", width=150)
 
     st.markdown("---")
-
-    # 2. ターゲット & デザイン
+    st.subheader("2. Target & Design")
     col_a, col_b = st.columns(2)
-
     with col_a:
-        st.subheader("2. Target Audience")
-        c1, c2 = st.columns(2)
-        with c1:
-            age = st.number_input("年齢層", min_value=10, max_value=90, value=30, step=5)
-            income = st.selectbox("収入層", ["High", "Medium", "Low"], index=1)
-        with c2:
-            gender = st.radio("性別", ["男性", "女性", "その他"], horizontal=True)
-            repeat_type = st.selectbox("顧客タイプ", ["新規層 (Attention重視)", "リピーター (Recall重視)"])
-
+        age = st.number_input("年齢", 30, step=5)
+        income = st.selectbox("収入", ["High", "Medium", "Low"], index=1)
+        gender = st.radio("性別", ["男性", "女性", "その他"], horizontal=True)
+        repeat_type = st.selectbox("タイプ", ["新規層", "リピーター"])
     with col_b:
-        st.subheader("3. Design Configuration")
-        orientation = st.selectbox("画面の向き", ["横長 (Landscape 16:9)", "縦長 (Portrait 9:16)"])
-        layout = st.selectbox("レイアウト構成", ["全面画像 (Full Image)", "テキスト重視 (Text Heavy)", "4分割グリッド (4-Grid)", "3分割 (Split)", "シズル感重視 (Sizzle Focus)"])
+        orientation = st.selectbox("向き", ["横長 (16:9)", "縦長 (9:16)"])
+        layout = st.selectbox("レイアウト", ["全面画像", "テキスト重視", "4分割グリッド", "シズル感重視"])
 
-    # ロジック変換
     aspect_ratio = "16:9" if "横長" in orientation else "9:16"
-    
     st.markdown("<br>", unsafe_allow_html=True)
-    submitted = st.form_submit_button("Generate Creative Prompt 🚀")
+    submitted = st.form_submit_button("Generate Creative & Image 🚀")
 
-# --- 結果表示エリア ---
-if submitted:
-    if not api_key:
-        st.error("⚠️ OpenAI API Keyを入力してください。")
-    elif not product_name:
-        st.warning("⚠️ 商品名を入力してください。")
+if submitted and api_key:
+    if not product_name:
+        st.warning("商品名を入力してください。")
     else:
-        # 入力データの整理
         p_info = {"name": product_name, "features": product_features}
         t_info = {"age": age, "gender": gender, "income": income, "repeat_type": repeat_type}
         d_info = {"orientation": orientation, "aspect_ratio": aspect_ratio, "layout": layout}
-        
-        # 画像処理
         img_b64 = encode_image(uploaded_file) if uploaded_file else None
         
-        # 処理中の表示
-        with st.status("💡 WPP Ace Creative Director is brainstorming...", expanded=True) as status:
-            st.write("Analyzing target demographics...")
-            st.write("Defining color psychology for convenience store environment...")
-            st.write("Drafting visual composition...")
+        # 進行状況コンテナ
+        status_container = st.status("💡 WPP Ace Creative Director is working...", expanded=True)
+        
+        try:
+            # 1. プロンプト生成 (GPT-4o)
+            status_container.write("1. Brainstorming & Generating Prompt...")
+            json_result_str = generate_json_prompt(api_key, p_info, t_info, d_info, img_b64)
+            json_data = json.loads(json_result_str)
             
-            try:
-                # APIコール
-                json_result_str = generate_prompt(api_key, p_info, t_info, d_info, img_b64)
-                
-                # JSONパース
-                json_data = json.loads(json_result_str)
-                
-                status.update(label="✅ Generation Complete!", state="complete", expanded=False)
-                
-                # 結果表示
-                st.success("プロンプト生成に成功しました")
-                
-                # 2カラムで解説とJSONを表示
-                res_col1, res_col2 = st.columns([1, 1])
-                
-                with res_col1:
-                    st.markdown("### 🎨 Creative Strategy")
-                    st.info(f"**Target Analysis:**\n{json_data.get('target_audience')}")
-                    st.write(f"**Concept Rationale:**\n{json_data.get('concept_rationale')}")
-                    
-                    # カラーパレットの可視化 (もしJSONに含まれていれば)
-                    if "color_palette" in json_data["nano_banana_pro_prompt"]:
-                        st.write("**Recommended Colors:**")
-                        cols = st.columns(len(json_data["nano_banana_pro_prompt"]["color_palette"]))
-                        for idx, color in enumerate(json_data["nano_banana_pro_prompt"]["color_palette"]):
-                            cols[idx].color_picker(f"Color {idx+1}", color, disabled=True)
+            # データの安全な取得
+            final_data = json_data.get('nano_banana_pro_prompt', json_data)
+            prompt_text = final_data.get('prompt', '')
 
-                with res_col2:
-                    st.markdown("### 📋 JSON Output (Nano Banana Pro)")
-                    st.code(json.dumps(json_data["nano_banana_pro_prompt"], indent=4), language='json')
-                    
-                    # コピー用など
-                    st.download_button(
-                        label="Download JSON",
-                        data=json.dumps(json_data["nano_banana_pro_prompt"], indent=4),
-                        file_name="nano_banana_prompt.json",
-                        mime="application/json"
-                    )
+            if not prompt_text:
+                raise ValueError("Prompt text not found in JSON response")
 
-            except openai.AuthenticationError:
-                st.error("🚫 API Keyが無効です。正しいキーを確認してください。")
-            except openai.APIConnectionError:
-                st.error("🔌 通信エラーが発生しました。ネットワーク接続を確認してください。")
-            except Exception as e:
-                st.error(f"❌ 予期せぬエラーが発生しました: {e}")
+            status_container.write("✅ Prompt Generated!")
+
+            # 2. 画像生成 (DALL-E 3)
+            status_container.write("2. Generating Image with DALL-E 3 (This takes a moment)...")
+            image_url = generate_image_dalle3(api_key, prompt_text, orientation)
+            
+            status_container.update(label="✨ All Processes Complete!", state="complete", expanded=False)
+
+            # --- 結果表示 ---
+            st.success("生成完了しました")
+            
+            # 上段: 画像
+            st.subheader("🖼️ Generated Creative")
+            st.image(image_url, caption=f"Generated for: {product_name}", use_column_width=True)
+
+            # 下段: 2カラム詳細
+            res_col1, res_col2 = st.columns(2)
+            
+            with res_col1:
+                st.markdown("### 🎨 Strategy & Prompt")
+                st.info(f"**Target:** {json_data.get('target_audience', 'N/A')}")
+                st.write(f"**Rationale:** {json_data.get('concept_rationale', 'N/A')}")
+                st.text_area("Generated English Prompt", prompt_text, height=150)
+
+            with res_col2:
+                st.markdown("### 📋 JSON Data")
+                st.code(json.dumps(final_data, indent=4), language='json')
+                st.download_button(
+                    label="Download JSON",
+                    data=json.dumps(final_data, indent=4),
+                    file_name="nano_banana_prompt.json",
+                    mime="application/json"
+                )
+
+        except Exception as e:
+            status_container.update(label="❌ Error Occurred", state="error")
+            st.error(f"エラーが発生しました: {e}")
+            if 'json_result_str' in locals():
+                with st.expander("Raw Response for Debug"):
+                    st.text(json_result_str)
